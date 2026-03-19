@@ -1,0 +1,172 @@
+name: 🚀 RDP Ultra Pro Max
+on:
+  workflow_dispatch:
+    inputs:
+      rdp_password:
+        description: 'كلمة المرور لسطح البعيد'
+        required: false
+        default: 'P@ssw0rd_' + ${{ github.run_id }}
+      duration_hours:
+        description: 'مدة التشغيل (ساعات)'
+        required: true
+        default: '6'
+        type: choice
+        options:
+          - '2'
+          - '4'
+          - '6'
+          - '8'
+          - '12'
+      ngrok_token:
+        description: 'Ngrok Token (اختياري - بديل عن Tailscale)'
+        required: false
+
+jobs:
+  ultra-rdp:
+    runs-on: windows-latest
+    timeout-minutes: ${{ fromJSON(github.event.inputs.duration_hours) * 60 }}
+    
+    steps:
+      - name: ⚙️ تحسينات النظام المتقدمة
+        run: |
+          # إعدادات RDP محسنة
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          
+          # تحسين الأداء
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 10
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 4294967295
+          
+          # تعطيل التحديثات التلقائية المزعجة
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Value 1
+          
+          Write-Host "✅ تم تحسين النظام بنجاح"
+
+      - name: 🔐 إنشاء مستخدمين متعددين
+        run: |
+          $password = "${{ github.event.inputs.rdp_password }}"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # مستخدم رئيسي مع صلاحيات كاملة
+          $mainUser = "AdminUser"
+          if (-not (Get-LocalUser -Name $mainUser -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $mainUser -Password $securePass -FullName "Administrator" -Description "Main Admin" -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member $mainUser
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $mainUser
+          }
+          
+          # مستخدم ثانوي للمشاهدة فقط (اختياري)
+          $guestUser = "GuestViewer"
+          if (-not (Get-LocalUser -Name $guestUser -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $guestUser -Password $securePass -FullName "Guest User" -AccountNeverExpires
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $guestUser
+          }
+          
+          # حفظ كل البيانات
+          echo "RDP_CREDS_ADMIN=User: $mainUser | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS_GUEST=User: $guestUser | Password: $password" >> $env:GITHUB_ENV
+
+      - name: 📦 تثبيت أدوات أساسية
+        run: |
+          # Chocolatey package manager
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          
+          # تثبيت برامج مفيدة
+          choco install -y googlechrome firefox vscode 7zip telegram discord
+          
+          Write-Host "✅ تم تثبيت البرامج الأساسية"
+
+      - name: 🌐 إعداد الاتصال المتعدد (Tailscale + Ngrok + Cloudflare)
+        run: |
+          # 1. Tailscale VPN (آمن وسريع)
+          if ("${{ secrets.TAILSCALE_AUTH_KEY }}") {
+            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi"
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$env:TEMP\tailscale.msi`"", "/quiet", "/norestart" -Wait
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }}
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          }
+          
+          # 2. Ngrok (إذا تم توفير token)
+          if ("${{ github.event.inputs.ngrok_token }}") {
+            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "$env:TEMP\ngrok.zip"
+            Expand-Archive "$env:TEMP\ngrok.zip" -DestinationPath "$env:ProgramFiles\ngrok" -Force
+            & "$env:ProgramFiles\ngrok\ngrok.exe" config add-authtoken ${{ github.event.inputs.ngrok_token }}
+            Start-Process -NoNewWindow -FilePath "$env:ProgramFiles\ngrok\ngrok.exe" -ArgumentList "tcp 3389"
+            Start-Sleep -Seconds 5
+            $ngrokUrl = (Invoke-RestMethod http://localhost:4040/api/tunnels).tunnels[0].public_url
+            echo "NGROK_URL=$ngrokUrl" >> $env:GITHUB_ENV
+          }
+
+      - name: 📊 معلومات النظام والإحصائيات
+        run: |
+          $computerInfo = @"
+          ╔══════════════════════════════════════════╗
+          ║         🖥️ معلومات الجهاز المتقدم         ║
+          ╠══════════════════════════════════════════╣
+          ║ اسم الجهاز: $(hostname)
+          ║ المعالج: $(Get-CimInstance Win32_Processor | Select-Object -First 1 | % Name)
+          ║ الرام: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)) GB
+          ║ نظام التشغيل: $(Get-CimInstance Win32_OperatingSystem | % Caption)
+          ║ الإصدار: $(Get-CimInstance Win32_OperatingSystem | % Version)
+          ║ آخر تشغيل: $(Get-CimInstance Win32_OperatingSystem | % LastBootUpTime)
+          ║ الوقت الحالي: $(Get-Date)
+          ╚══════════════════════════════════════════╝
+          "@
+          Write-Host $computerInfo
+
+      - name: 📱 طرق الاتصال المتاحة
+        run: |
+          Clear-Host
+          Write-Host @"
+          
+          ╔══════════════════════════════════════════════════════════╗
+          ║     🚀 تم تجهيز الجهاز! طرق الاتصال المتاحة:            ║
+          ╠══════════════════════════════════════════════════════════╣
+          ║                                                          ║
+          ║  🔐 بيانات الدخول:                                       ║
+          ║  ──────────────────────────────────────────────────     ║
+          ║  المسؤول: AdminUser                                      ║
+          ║  الضيف:   GuestViewer                                    ║
+          ║  كلمة المرور: ${{ github.event.inputs.rdp_password }}   ║
+          ║                                                          ║
+          ║  🌐 عبر Tailscale:                                       ║
+          ║  $([string]$env:TAILSCALE_IP)                            ║
+          ║                                                          ║
+          ║  🔗 عبر Ngrok:                                           ║
+          ║  $([string]$env:NGROK_URL)                               ║
+          ║                                                          ║
+          ║  📝 البرامج المثبتة:                                     ║
+          ║  Chrome, Firefox, VSCode, 7zip, Telegram, Discord      ║
+          ║                                                          ║
+          ║  ⏱️ المدة: ${{ github.event.inputs.duration_hours }} ساعات ║
+          ║  ⚡ ينتهي تلقائياً بعد المدة المحددة                    ║
+          ║                                                          ║
+          ╚══════════════════════════════════════════════════════════╝
+          
+          "@
+
+      - name: 🔄 الحفاظ على الاتصال مع مراقبة الأداء
+        run: |
+          $counter = 0
+          while ($true) {
+            $counter++
+            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
+            $ram = (Get-Counter '\Memory\Available MBytes').CounterSamples.CookedValue
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏱️ مستمر منذ $counter دقيقة | CPU: $([math]::Round($cpu,1))% | RAM متاح: $([math]::Round($ram/1024,2)) GB"
+            
+            # فحص الاتصال كل 5 دقائق
+            if ($counter % 5 -eq 0) {
+              $testResult = Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
+              if ($testResult.TcpTestSucceeded) {
+                Write-Host "✅ RDP يعمل بشكل طبيعي"
+              }
+            }
+            
+            Start-Sleep -Seconds 60
+          }
