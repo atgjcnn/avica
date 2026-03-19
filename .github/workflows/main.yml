@@ -1,24 +1,17 @@
 name: RDP
 on:
   workflow_dispatch:
-    inputs:
-      duration:
-        description: 'مدة التشغيل (بالدقائق)'
-        required: true
-        default: true 3600  # 👈 بدون علامات تنصيص!
-
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: ${{ github.event.inputs.duration }}  # 👈 بدون fromJSON
-    
+    timeout-minutes: 3600
     steps:
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
@@ -28,119 +21,62 @@ jobs:
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires
           }
 
-          try {
-              Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
-          } catch {
-              Write-Host "⚠️ المستخدم موجود مسبقاً في المجموعات"
-          }
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
 
-          echo "RDP_USERNAME=TOOLBOXLAP" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
+
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
-          if (-not (Test-Path $installerPath)) {
-              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-              Remove-Item $installerPath -Force
-          }
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsPath)) {
-              Write-Error "❌ Tailscale غير موجود!"
-              exit 1
-          }
-
-          & $tsPath up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
-          
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
-          $maxRetries = 15
-          
-          while (-not $tsIP -and $retries -lt $maxRetries) {
-              $tsIP = & $tsPath ip -4 2>$null
-              if (-not $tsIP) {
-                  Write-Host "⏳ انتظار تعيين IP... ($retries/$maxRetries)"
-                  Start-Sleep -Seconds 5
-                  $retries++
-              }
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-          
           if (-not $tsIP) {
-              Write-Error "❌ فشل الحصول على IP من Tailscale"
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
-          
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "✅ تم الاتصال بنجاح! IP: $tsIP"
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "📡 Tailscale IP: $env:TAILSCALE_IP"
-          
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
-          
-          if (-not $testResult) {
-              Write-Warning "⚠️ فشل الاتصال المباشر، جرب استخدام localhost"
-              $testResult = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 -InformationLevel Quiet
-              
-              if (-not $testResult) {
-                  Write-Error "❌ RDP لا يستجيب على أي منفذ"
-                  exit 1
-              }
-              Write-Host "✅ RDP يعمل محلياً (127.0.0.1:3389)"
-          } else {
-              Write-Host "✅ RDP يعمل على Tailscale IP: $env:TAILSCALE_IP:3389"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
           }
-
-      - name: Display Connection Info
-        run: |
-          Clear-Host
-          Write-Host @"
-          
-          ╔══════════════════════════════════════════════════════════╗
-          ║     ✅ RDP جاهز للاتصال - TOOLBOXLAP                     ║
-          ╠══════════════════════════════════════════════════════════╣
-          ║                                                          ║
-          ║  📍 Tailscale IP: $env:TAILSCALE_IP                      ║
-          ║  👤 Username: TOOLBOXLAP                                 ║
-          ║  🔑 Password: admin@123                                  ║
-          ║                                                          ║
-          ║  ⏱️  المدة: ${{ github.event.inputs.duration }} دقيقة    ║
-          ║  🖥️  النظام: Windows Latest                              ║
-          ║                                                          ║
-          ║  💡 استخدم الأمر التالي للاتصال:                         ║
-          ║  mstsc /v:$env:TAILSCALE_IP:3389                         ║
-          ║                                                          ║
-          ╚══════════════════════════════════════════════════════════╝
-          
-          "@ | Out-Host
+          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
-          $startTime = Get-Date
-          $duration = ${{ github.event.inputs.duration }}
-          
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: TOOLBOXLAP"
+          Write-Host "Password: admin@123"
+          Write-Host "==================`n"
           while ($true) {
-              $elapsed = (Get-Date) - $startTime
-              $remaining = $duration - $elapsed.TotalMinutes
-              
-              if ($remaining -le 0) {
-                  Write-Host "⏰ انتهت المدة المحددة! إيقاف التشغيل..."
-                  break
-              }
-              
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏱️ مستمر منذ $([math]::Round($elapsed.TotalMinutes,1)) دقيقة | متبقي: $([math]::Round($remaining,1)) دقيقة"
-              Start-Sleep -Seconds 60
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
