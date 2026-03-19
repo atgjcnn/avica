@@ -1,172 +1,155 @@
-name: 🚀 RDP Ultra Pro Max
+name: RDP
 on:
   workflow_dispatch:
-    inputs:
-      rdp_password:
-        description: 'كلمة المرور لسطح البعيد'
-        required: false
-        default: 'P@ssw0rd_' + ${{ github.run_id }}
-      duration_hours:
-        description: 'مدة التشغيل (ساعات)'
+    inputs:           # ✅ تم إضافة inputs
+      duration:
+        description: 'مدة التشغيل (بالدقائق)'
         required: true
-        default: '6'
-        type: choice
-        options:
-          - '2'
-          - '4'
-          - '6'
-          - '8'
-          - '12'
-      ngrok_token:
-        description: 'Ngrok Token (اختياري - بديل عن Tailscale)'
-        required: false
+        default: '3600'
 
 jobs:
-  ultra-rdp:
+  secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: ${{ fromJSON(github.event.inputs.duration_hours) * 60 }}
+    timeout-minutes: ${{ fromJSON(github.event.inputs.duration) }}  # ✅ تم تصحيح استخدام المتغير
     
     steps:
-      - name: ⚙️ تحسينات النظام المتقدمة
+      - name: Configure Core RDP Settings
         run: |
-          # إعدادات RDP محسنة
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-          
-          # تحسين الأداء
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 10
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 4294967295
-          
-          # تعطيل التحديثات التلقائية المزعجة
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Value 1
-          
-          Write-Host "✅ تم تحسين النظام بنجاح"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null  # ✅ تجاهل الخطأ إذا كانت القاعدة غير موجودة
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
 
-      - name: 🔐 إنشاء مستخدمين متعددين
+      - name: Create RDP User with Static Password
         run: |
-          $password = "${{ github.event.inputs.rdp_password }}"
+          $password = "admin@123"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          # مستخدم رئيسي مع صلاحيات كاملة
-          $mainUser = "AdminUser"
-          if (-not (Get-LocalUser -Name $mainUser -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $mainUser -Password $securePass -FullName "Administrator" -Description "Main Admin" -AccountNeverExpires
-              Add-LocalGroupMember -Group "Administrators" -Member $mainUser
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $mainUser
-          }
-          
-          # مستخدم ثانوي للمشاهدة فقط (اختياري)
-          $guestUser = "GuestViewer"
-          if (-not (Get-LocalUser -Name $guestUser -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $guestUser -Password $securePass -FullName "Guest User" -AccountNeverExpires
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $guestUser
-          }
-          
-          # حفظ كل البيانات
-          echo "RDP_CREDS_ADMIN=User: $mainUser | Password: $password" >> $env:GITHUB_ENV
-          echo "RDP_CREDS_GUEST=User: $guestUser | Password: $password" >> $env:GITHUB_ENV
 
-      - name: 📦 تثبيت أدوات أساسية
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires  # ✅ إضافة PasswordNeverExpires
+          }
+
+          # ✅ التحقق من وجود المجموعات قبل الإضافة
+          try {
+              Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
+          } catch {
+              Write-Host "⚠️ المستخدم موجود مسبقاً في المجموعات"
+          }
+
+          # ✅ حفظ البيانات بشكل صحيح
+          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_USERNAME=TOOLBOXLAP" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
         run: |
-          # Chocolatey package manager
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-          Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          
-          # تثبيت برامج مفيدة
-          choco install -y googlechrome firefox vscode 7zip telegram discord
-          
-          Write-Host "✅ تم تثبيت البرامج الأساسية"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
 
-      - name: 🌐 إعداد الاتصال المتعدد (Tailscale + Ngrok + Cloudflare)
-        run: |
-          # 1. Tailscale VPN (آمن وسريع)
-          if ("${{ secrets.TAILSCALE_AUTH_KEY }}") {
-            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-            Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi"
-            Start-Process msiexec.exe -ArgumentList "/i", "`"$env:TEMP\tailscale.msi`"", "/quiet", "/norestart" -Wait
-            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${{ github.run_id }}
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          }
-          
-          # 2. Ngrok (إذا تم توفير token)
-          if ("${{ github.event.inputs.ngrok_token }}") {
-            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "$env:TEMP\ngrok.zip"
-            Expand-Archive "$env:TEMP\ngrok.zip" -DestinationPath "$env:ProgramFiles\ngrok" -Force
-            & "$env:ProgramFiles\ngrok\ngrok.exe" config add-authtoken ${{ github.event.inputs.ngrok_token }}
-            Start-Process -NoNewWindow -FilePath "$env:ProgramFiles\ngrok\ngrok.exe" -ArgumentList "tcp 3389"
-            Start-Sleep -Seconds 5
-            $ngrokUrl = (Invoke-RestMethod http://localhost:4040/api/tunnels).tunnels[0].public_url
-            echo "NGROK_URL=$ngrokUrl" >> $env:GITHUB_ENV
+          # ✅ التحقق من وجود الملف قبل التحميل
+          if (-not (Test-Path $installerPath)) {
+              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+              Remove-Item $installerPath -Force
+          } else {
+              Write-Host "✅ Tailscale مثبت مسبقاً"
           }
 
-      - name: 📊 معلومات النظام والإحصائيات
+      - name: Establish Tailscale Connection
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $computerInfo = @"
-          ╔══════════════════════════════════════════╗
-          ║         🖥️ معلومات الجهاز المتقدم         ║
-          ╠══════════════════════════════════════════╣
-          ║ اسم الجهاز: $(hostname)
-          ║ المعالج: $(Get-CimInstance Win32_Processor | Select-Object -First 1 | % Name)
-          ║ الرام: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)) GB
-          ║ نظام التشغيل: $(Get-CimInstance Win32_OperatingSystem | % Caption)
-          ║ الإصدار: $(Get-CimInstance Win32_OperatingSystem | % Version)
-          ║ آخر تشغيل: $(Get-CimInstance Win32_OperatingSystem | % LastBootUpTime)
-          ║ الوقت الحالي: $(Get-Date)
-          ╚══════════════════════════════════════════╝
-          "@
-          Write-Host $computerInfo
+          # ✅ التأكد من وجود Tailscale في PATH
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsPath)) {
+              Write-Error "❌ Tailscale غير موجود!"
+              exit 1
+          }
 
-      - name: 📱 طرق الاتصال المتاحة
+          & $tsPath up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
+          
+          # ✅ الحصول على IP مع timeout
+          $tsIP = $null
+          $retries = 0
+          $maxRetries = 15  # ✅ زيادة المحاولات
+          
+          while (-not $tsIP -and $retries -lt $maxRetries) {
+              $tsIP = & $tsPath ip -4 2>$null
+              if (-not $tsIP) {
+                  Write-Host "⏳ انتظار تعيين IP... ($retries/$maxRetries)"
+                  Start-Sleep -Seconds 5
+                  $retries++
+              }
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "❌ فشل الحصول على IP من Tailscale"
+              exit 1
+          }
+          
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "✅ تم الاتصال بنجاح! IP: $tsIP"
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "📡 Tailscale IP: $env:TAILSCALE_IP"
+          
+          # ✅ اختبار اتصال متقدم
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
+          
+          if (-not $testResult) {
+              Write-Warning "⚠️ فشل الاتصال المباشر، جرب استخدام localhost"
+              $testResult = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 -InformationLevel Quiet
+              
+              if (-not $testResult) {
+                  Write-Error "❌ RDP لا يستجيب على أي منفذ"
+                  exit 1
+              }
+              Write-Host "✅ RDP يعمل محلياً (127.0.0.1:3389)"
+          } else {
+              Write-Host "✅ RDP يعمل على Tailscale IP: $env:TAILSCALE_IP:3389"
+          }
+
+      - name: Display Connection Info
         run: |
           Clear-Host
           Write-Host @"
           
           ╔══════════════════════════════════════════════════════════╗
-          ║     🚀 تم تجهيز الجهاز! طرق الاتصال المتاحة:            ║
+          ║     ✅ RDP جاهز للاتصال - TOOLBOXLAP                     ║
           ╠══════════════════════════════════════════════════════════╣
           ║                                                          ║
-          ║  🔐 بيانات الدخول:                                       ║
-          ║  ──────────────────────────────────────────────────     ║
-          ║  المسؤول: AdminUser                                      ║
-          ║  الضيف:   GuestViewer                                    ║
-          ║  كلمة المرور: ${{ github.event.inputs.rdp_password }}   ║
+          ║  📍 Tailscale IP: $env:TAILSCALE_IP                      ║
+          ║  👤 Username: TOOLBOXLAP                                 ║
+          ║  🔑 Password: admin@123                                  ║
           ║                                                          ║
-          ║  🌐 عبر Tailscale:                                       ║
-          ║  $([string]$env:TAILSCALE_IP)                            ║
+          ║  ⏱️  المدة: ${{ github.event.inputs.duration }} دقيقة    ║
+          ║  🖥️  النظام: Windows Latest                              ║
           ║                                                          ║
-          ║  🔗 عبر Ngrok:                                           ║
-          ║  $([string]$env:NGROK_URL)                               ║
-          ║                                                          ║
-          ║  📝 البرامج المثبتة:                                     ║
-          ║  Chrome, Firefox, VSCode, 7zip, Telegram, Discord      ║
-          ║                                                          ║
-          ║  ⏱️ المدة: ${{ github.event.inputs.duration_hours }} ساعات ║
-          ║  ⚡ ينتهي تلقائياً بعد المدة المحددة                    ║
+          ║  💡 استخدم الأمر التالي للاتصال:                         ║
+          ║  mstsc /v:$env:TAILSCALE_IP:3389                         ║
           ║                                                          ║
           ╚══════════════════════════════════════════════════════════╝
           
-          "@
+          "@ | Out-Host
 
-      - name: 🔄 الحفاظ على الاتصال مع مراقبة الأداء
+      - name: Maintain Connection
         run: |
-          $counter = 0
+          $startTime = Get-Date
+          $duration = ${{ github.event.inputs.duration }}
+          
           while ($true) {
-            $counter++
-            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
-            $ram = (Get-Counter '\Memory\Available MBytes').CounterSamples.CookedValue
-            
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏱️ مستمر منذ $counter دقيقة | CPU: $([math]::Round($cpu,1))% | RAM متاح: $([math]::Round($ram/1024,2)) GB"
-            
-            # فحص الاتصال كل 5 دقائق
-            if ($counter % 5 -eq 0) {
-              $testResult = Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
-              if ($testResult.TcpTestSucceeded) {
-                Write-Host "✅ RDP يعمل بشكل طبيعي"
+              $elapsed = (Get-Date) - $startTime
+              $remaining = $duration - $elapsed.TotalMinutes
+              
+              if ($remaining -le 0) {
+                  Write-Host "⏰ انتهت المدة المحددة! إيقاف التشغيل..."
+                  break
               }
-            }
-            
-            Start-Sleep -Seconds 60
+              
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ⏱️ مستمر منذ $([math]::Round($elapsed.TotalMinutes,1)) دقيقة | متبقي: $([math]::Round($remaining,1)) دقيقة"
+              Start-Sleep -Seconds 60
           }
