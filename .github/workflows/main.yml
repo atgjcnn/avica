@@ -1,16 +1,16 @@
 name: RDP
 on:
   workflow_dispatch:
-    inputs:           # ✅ تم إضافة inputs
+    inputs:
       duration:
         description: 'مدة التشغيل (بالدقائق)'
         required: true
-        default: '3600'
+        default: true 3600  # 👈 بدون علامات تنصيص!
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: ${{ fromJSON(github.event.inputs.duration) }}  # ✅ تم تصحيح استخدام المتغير
+    timeout-minutes: ${{ github.event.inputs.duration }}  # 👈 بدون fromJSON
     
     steps:
       - name: Configure Core RDP Settings
@@ -18,7 +18,7 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null  # ✅ تجاهل الخطأ إذا كانت القاعدة غير موجودة
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
@@ -28,10 +28,9 @@ jobs:
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires  # ✅ إضافة PasswordNeverExpires
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           }
 
-          # ✅ التحقق من وجود المجموعات قبل الإضافة
           try {
               Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP" -ErrorAction SilentlyContinue
@@ -39,8 +38,6 @@ jobs:
               Write-Host "⚠️ المستخدم موجود مسبقاً في المجموعات"
           }
 
-          # ✅ حفظ البيانات بشكل صحيح
-          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
           echo "RDP_USERNAME=TOOLBOXLAP" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
@@ -49,20 +46,16 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
-          # ✅ التحقق من وجود الملف قبل التحميل
           if (-not (Test-Path $installerPath)) {
               Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
               Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
               Remove-Item $installerPath -Force
-          } else {
-              Write-Host "✅ Tailscale مثبت مسبقاً"
           }
 
       - name: Establish Tailscale Connection
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          # ✅ التأكد من وجود Tailscale في PATH
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsPath)) {
               Write-Error "❌ Tailscale غير موجود!"
@@ -71,10 +64,9 @@ jobs:
 
           & $tsPath up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID"
           
-          # ✅ الحصول على IP مع timeout
           $tsIP = $null
           $retries = 0
-          $maxRetries = 15  # ✅ زيادة المحاولات
+          $maxRetries = 15
           
           while (-not $tsIP -and $retries -lt $maxRetries) {
               $tsIP = & $tsPath ip -4 2>$null
@@ -97,7 +89,6 @@ jobs:
         run: |
           Write-Host "📡 Tailscale IP: $env:TAILSCALE_IP"
           
-          # ✅ اختبار اتصال متقدم
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
           
           if (-not $testResult) {
